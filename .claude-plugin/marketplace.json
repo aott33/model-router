@@ -1,0 +1,13 @@
+{
+  "name": "model-router",
+  "owner": {
+    "name": "Andy"
+  },
+  "plugins": [
+    {
+      "name": "model-router",
+      "source": "./"
+    }
+  ],
+  "description": "Routes each Claude Code subagent to Haiku, Sonnet, Opus or Fable and shows the bill"
+}

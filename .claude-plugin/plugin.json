@@ -1,0 +1,28 @@
+{
+  "name": "model-router",
+  "version": "0.2.0",
+  "description": "Haiku sorts every subagent task into simple, standard, hard or long run and picks the model; a pane shows what each agent cost.",
+  "author": { "name": "Andy" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "baseline": {
+      "type": "string",
+      "title": "Compare against",
+      "description": "What the bill pane prices the same tokens on, to show what routing saved. unrouted: the model each agent would have run on without the router (its parent's), so the main conversation saves nothing",
+      "options": ["unrouted", "fable", "opus", "sonnet"],
+      "default": "unrouted"
+    },
+    "routeAll": {
+      "type": "boolean",
+      "title": "Route every subagent",
+      "description": "On: route built-in subagents (Explore, general-purpose) too. Off: only the four router agents.",
+      "default": true
+    },
+    "respectExplicitModel": {
+      "type": "boolean",
+      "title": "Keep a model Claude asked for",
+      "description": "On: when the Agent call already names a model, leave it alone",
+      "default": true
+    }
+  }
+}
