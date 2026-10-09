@@ -34,6 +34,45 @@ export const CLASSIFIER_MODEL = 'claude-haiku-4-5-20251001'
 
 export const ORDER: Tier[] = ['simple', 'standard', 'hard', 'long']
 
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
+
+/**
+ * The most reasoning effort a routed agent's requests may ask for, by tier. Easy work
+ * thinks less; hard and long work keep whatever the session would have used.
+ */
+export const EFFORT_CAP: Record<Tier, Effort | undefined> = {
+  simple: 'low',
+  standard: 'medium',
+  hard: undefined,
+  long: undefined,
+}
+
+/**
+ * The lower of a request's effort and the cap. An integer budget or a level this
+ * table does not know is left alone, as is a request without effort.
+ */
+export function capEffort<E>(effort: E, cap: Effort | undefined): E | Effort {
+  if (!cap || typeof effort !== 'string') return effort
+  const i = EFFORTS.indexOf(effort as Effort)
+  return i < 0 || i <= EFFORTS.indexOf(cap) ? effort : cap
+}
+
+/** `/router` modes: `on` classifies, `off` leaves every spawn alone, a model name sends every routed spawn there. */
+export type Mode = 'on' | 'off' | 'haiku' | 'sonnet' | 'opus'
+export const MODES: Mode[] = ['on', 'off', 'haiku', 'sonnet', 'opus']
+
+export function parseMode(text: unknown): Mode | undefined {
+  const m = String(text ?? '').trim().toLowerCase()
+  return (MODES as string[]).includes(m) ? (m as Mode) : undefined
+}
+
+export const FORCED_TIER: Record<Exclude<Mode, 'on' | 'off'>, Tier> = {
+  haiku: 'simple',
+  sonnet: 'standard',
+  opus: 'hard',
+}
+
 /**
  * Which price row a model id or alias falls in. Mythos bills as Fable.
  * A bare `haiku` alias is the current Haiku (5.5). Unknown ids price as Opus.
@@ -144,6 +183,12 @@ hard     - needs deep reasoning: architecture or design decisions, an intermitte
 long     - a multi-hour autonomous run: a large multi-step build or migration across many files, explicitly long-running or background work that must keep going unattended.
 
 Pick the cheapest tier that will succeed. If unsure between two, pick the higher. Reply with one word: simple, standard, hard, or long.`
+
+/** What the engine's built-in classifier reads when Haiku 4.5 gives no tier: no rubric, so keep it short. */
+export function builtinClassifierText(input: { agentType: string; description: string; prompt: string }): string {
+  const body = input.prompt.length > 2000 ? input.prompt.slice(0, 2000) + ' [...]' : input.prompt
+  return `How hard is this coding task for an AI agent? Agent: ${input.agentType}. ${input.description}. ${body}`
+}
 
 export function classifierPrompt(input: {
   agentType: string
