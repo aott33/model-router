@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { clampTier, costOf, familyOf, parseTier, tierOfModel } from './lib/pricing'
+import { capEffort, clampTier, costOf, familyOf, parseMode, parseTier, tierOfModel } from './lib/pricing'
 
 /** Billionths of a dollar, so float sums compare exactly. */
 const nano = (usd: number) => Math.round(usd * 1e9)
@@ -56,7 +56,36 @@ describe('pure routing rules', () => {
     expect(tierOfModel('opus')).toBe('hard')
     expect(tierOfModel('claude-haiku-4-5')).toBe('simple')
   })
+
+  test('effort is only ever lowered', async () => {
+    expect(capEffort('high', 'low')).toBe('low')
+    expect(capEffort('low', 'medium')).toBe('low')
+    expect(capEffort('xhigh', undefined)).toBe('xhigh')
+    expect(capEffort(4096, 'low')).toBe(4096)
+    expect(capEffort(undefined, 'low')).toBe(undefined)
+    expect(parseMode(' Sonnet ')).toBe('sonnet')
+    expect(parseMode('fable')).toBe(undefined)
+  })
 })
+
+/** Records the effort each request reaches the engine with; register it before the test's first `$` call. */
+function captureEffort(on: any) {
+  const seen: { effort?: unknown } = { effort: 'unset' }
+  on('turn.step', async function* (_$: unknown, e: any) {
+    seen.effort = e.effort
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as never }
+  })
+  return seen
+}
+
+/** Runs one request of agent `agentId` through the plugin. */
+async function step($: any, agentId: string, effort: string | undefined) {
+  const s = $.turn.step({ turnId: 't1', index: 0, model: 'claude-haiku-5-5', messageCount: 1, agentId, effort })
+  for await (const _ of s) {
+    // drain
+  }
+  await s.result
+}
 
 describe('agent.spawn', () => {
   test('Haiku says simple, the builder runs on Haiku 5.5', async ($, on) => {
@@ -158,6 +187,124 @@ describe('agent.spawn', () => {
     await $.agent.spawn(spawnInput({ isTeammate: true, background: true, name: 'scout' }))
     expect(spawnedOn).toBe(undefined)
     expect(classified).toBe(false)
+  })
+})
+
+describe('effort', () => {
+  test('a simple task asks for low effort', async ($, on) => {
+    mock.clock(on)
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'simple', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => ({ model: e.model ?? '', agentId: 'e1' }))
+    const seen = captureEffort(on)
+    await $.agent.spawn(spawnInput())
+    await step($, 'e1', 'high')
+    expect(seen.effort).toBe('low')
+  })
+
+  test('a hard task keeps the effort it had', async ($, on) => {
+    mock.clock(on)
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'hard', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => ({ model: e.model ?? '', agentId: 'e2' }))
+    const seen = captureEffort(on)
+    await $.agent.spawn(spawnInput())
+    await step($, 'e2', 'xhigh')
+    expect(seen.effort).toBe('xhigh')
+  })
+
+  test('a model without effort is not given one', async ($, on) => {
+    mock.clock(on)
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'simple', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => ({ model: e.model ?? '', agentId: 'e3' }))
+    const seen = captureEffort(on)
+    await $.agent.spawn(spawnInput())
+    await step($, 'e3', undefined)
+    expect(seen.effort).toBe(undefined)
+  })
+
+  test('an Agent call that sets its own effort keeps it', async ($, on) => {
+    mock.clock(on)
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'simple', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => ({ model: e.model ?? '', agentId: 'e4' }))
+    on('tool.call', { tool: 'Agent' }, async () => ({ result: 'started' as never }))
+    const seen = captureEffort(on)
+    // In a session the spawn runs inside the Agent call; here it follows it.
+    await $.tool.call({ tool: 'Agent', tool_use_id: 'tu9', description: 'rename', prompt: 'rename x', effort: 'high' } as never)
+    await $.agent.spawn(spawnInput({ tool_use_id: 'tu9' }))
+    await step($, 'e4', 'high')
+    expect(seen.effort).toBe('high')
+  })
+})
+
+describe('/router modes', () => {
+  test('off leaves spawns alone and asks no classifier', async ($, on) => {
+    mock.clock(on)
+    mock.store(on)
+    let spawnedOn: string | undefined = 'unset'
+    let classified = false
+    on('model.complete', async () => {
+      classified = true
+      return { value: { isAnswered: true as const, text: 'simple', usage: USAGE } }
+    })
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: 'claude-opus-5-5', agentId: 'm1' }
+    })
+    await $.command.run({ command: 'router', args: 'off' } as never)
+    await $.agent.spawn(spawnInput())
+    expect(spawnedOn).toBe(undefined)
+    expect(classified).toBe(false)
+  })
+
+  test('sonnet sends every routed spawn to Sonnet 5.5 without classifying', async ($, on) => {
+    mock.clock(on)
+    mock.store(on)
+    let spawnedOn: string | undefined
+    let classified = false
+    on('model.complete', async () => {
+      classified = true
+      return { value: { isAnswered: true as const, text: 'simple', usage: USAGE } }
+    })
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'm2' }
+    })
+    await $.command.run({ command: 'router', args: 'sonnet' } as never)
+    await $.agent.spawn(spawnInput({ subagentType: 'model-router:runner' }))
+    expect(spawnedOn).toBe('claude-sonnet-5-5')
+    expect(classified).toBe(false)
+  })
+
+  test('a mode saved in an earlier session is used', async ($, on) => {
+    mock.clock(on)
+    mock.store(on, { mode: 'haiku' })
+    let spawnedOn: string | undefined
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'm3' }
+    })
+    await $.agent.spawn(spawnInput({ subagentType: 'model-router:architect' }))
+    expect(spawnedOn).toBe('claude-haiku-5-5')
+  })
+})
+
+describe('classifier fallback', () => {
+  test('when Haiku 4.5 fails, the built-in classifier picks the tier', async ($, on) => {
+    mock.clock(on)
+    let spawnedOn: string | undefined
+    on('model.complete', async () => ({ value: {
+      isAnswered: false as const,
+      reason: 'api-error' as const,
+      status: 404,
+      error: 'not_found' as never,
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    } }))
+    on('model.classify', async () => ({ value: 'hard' }))
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'c1' }
+    })
+    await $.agent.spawn(spawnInput())
+    expect(spawnedOn).toBe('claude-opus-5-5')
   })
 })
 

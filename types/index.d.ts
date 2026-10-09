@@ -1,5 +1,7 @@
 export type Tier = 'simple' | 'standard' | 'hard' | 'long'
 
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
 export type Tokens = {
   input: number
   output: number
@@ -14,11 +16,15 @@ export type AgentRow = {
   agentType: string
   tier?: Tier
   /**
-   * How the model was decided: the classifier, the role fallback, a model Claude
-   * named, or not routed (main, forks, workflow agents, teammates, built-ins when routing is off).
+   * How the model was decided: the Haiku classifier, the engine's built-in classifier
+   * when Haiku gave no tier, the role fallback, a model Claude named, a `/router` mode
+   * that sends everything to one model, or not routed (main, forks, workflow agents,
+   * teammates, built-ins when routing is narrowed, everything under `/router off`).
    */
-  via?: 'haiku' | 'fallback' | 'explicit' | 'unrouted'
+  via?: 'haiku' | 'builtin' | 'fallback' | 'explicit' | 'forced' | 'unrouted'
   model?: string
+  /** The most effort this agent's requests may ask for; absent when the router leaves effort alone. */
+  effort?: Effort
   /** What this agent would have run on without the router: the parent's model, or its own when unrouted. */
   baselineModel?: string
   tokens: Tokens

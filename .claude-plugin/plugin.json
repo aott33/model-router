@@ -1,6 +1,6 @@
 {
   "name": "model-router",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Haiku sorts every subagent task into simple, standard, hard or long run and picks the model; a pane shows what each agent cost.",
   "author": { "name": "Andy" },
   "types": "./types/index.d.ts",
@@ -22,6 +22,12 @@
       "type": "boolean",
       "title": "Keep a model Claude asked for",
       "description": "On: when the Agent call already names a model, leave it alone",
+      "default": true
+    },
+    "effortByTier": {
+      "type": "boolean",
+      "title": "Lower effort for easy tasks",
+      "description": "On: a simple task's subagent thinks at low effort and a standard one at medium at most. Hard and long tasks keep the effort they had, and an Agent call that sets its own effort keeps it",
       "default": true
     }
   }
