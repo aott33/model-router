@@ -14,14 +14,18 @@ import {
   addTokens,
   builtinClassifierText,
   capEffort,
-  clampTier,
   classifierPrompt,
   costOf,
   fallbackTier,
   familyOf,
+  fullestWindow,
+  looksRisky,
   parseMode,
+  parseRisky,
   parseTier,
+  pressureThreshold,
   roleOf,
+  routeTier,
   tierOfModel,
   tokensFromUsage,
   usd,
@@ -79,15 +83,40 @@ async function record($: EngineInterface, id: string, now: number, fields: Parti
   })
 }
 
+/** Tier tag for the pane: `!` when the risk floor raised it, `↓` when rate limits lowered it. */
+function tierTag(r: AgentRow): string {
+  if (!r.tier) return '- '
+  return (TIER_TAG[r.tier] + (r.risky ? '!' : r.pressure !== undefined ? '↓' : '')).padEnd(2)
+}
+
+/** The fullest rate-limit window in percent; 0 when the engine has none or the call fails. */
+async function windowPercent($: EngineInterface): Promise<number> {
+  try {
+    return fullestWindow((await $.session.usage()).rateLimits)
+  } catch {
+    return 0
+  }
+}
+
 function modeLabel(mode: Mode): string | undefined {
   if (mode === 'on') return undefined
   if (mode === 'off') return 'router off'
   return `router: all ${shortModel(MODEL_FOR_TIER[FORCED_TIER[mode]])}`
 }
 
-async function refreshStatus($: EngineInterface, baseline: Baseline, baselineName: string, mode: Mode) {
+async function refreshStatus(
+  $: EngineInterface,
+  baseline: Baseline,
+  baselineName: string,
+  mode: Mode,
+  pressureAt: number | undefined,
+) {
   const t = totals(await read($, ledger), baseline)
   const parts = [modeLabel(mode)]
+  if (mode === 'on' && pressureAt !== undefined) {
+    const pct = await windowPercent($)
+    if (pct >= pressureAt) parts.push(`limits ${Math.round(pct)}%: one tier down`)
+  }
   if (t.base > 0) parts.push(`${usd(t.cost)} vs ${usd(t.base)} ${baselineName} (${Math.round(t.saved * 100)}% saved)`)
   const text = parts.filter(Boolean).join(' · ')
   $.ui.status(text || undefined)
@@ -125,6 +154,8 @@ export const register: Register = (on, options) => {
   const respectExplicit = options.respectExplicitModel !== false
   const baselineName = baseline === 'unrouted' ? 'unrouted' : `on ${shortModel(baseline)}`
   const effortByTier = options.effortByTier !== false
+  const riskFloor = options.riskFloor !== false
+  const pressureAt = options.limitPressure === 'off' ? undefined : pressureThreshold(options.limitPressure)
 
   // Module state starts over on a hot reload; the mode is read back from the store.
   let mode: Mode = 'on'
@@ -185,7 +216,7 @@ export const register: Register = (on, options) => {
       } catch (err) {
         $.ui.log(`could not save the router mode: ${String(err)}`)
       }
-      await refreshStatus($, baseline, baselineName, mode)
+      await refreshStatus($, baseline, baselineName, mode, pressureAt)
       const what = {
         on: 'on: Haiku picks the model for each subagent',
         off: 'off: subagents run on the model they would have without the router',
@@ -242,6 +273,8 @@ export const register: Register = (on, options) => {
     let tier: Tier
     let via: AgentRow['via']
     let model: string | undefined
+    let risky = false
+    let pressure: number | undefined
 
     if (respectExplicit && e.model) {
       via = 'explicit'
@@ -271,7 +304,10 @@ export const register: Register = (on, options) => {
         )
         const c = costOf(tokensFromUsage(r.usage), familyOf(CLASSIFIER_MODEL))
         await update($, ledger, l => ({ ...l, classifierCost: l.classifierCost + c }))
-        if (r.isAnswered) picked = parseTier(r.text)
+        if (r.isAnswered) {
+          picked = parseTier(r.text)
+          risky = parseRisky(r.text)
+        }
       } catch {
         // try the built-in classifier
       }
@@ -295,7 +331,20 @@ export const register: Register = (on, options) => {
         }
       }
       via ??= 'fallback'
-      tier = clampTier(picked ?? fallbackTier(role), role, e.background)
+      // Without Haiku's judgment, only a plainly destructive act counts as risky.
+      if (via !== 'haiku') risky ||= looksRisky(`${e.description}\n${e.prompt}`)
+      risky &&= riskFloor
+      const asked = picked ?? fallbackTier(role)
+      tier = routeTier(asked, role, e.background, { risky })
+      if (pressureAt !== undefined) {
+        const pct = await windowPercent($)
+        const lower = pct >= pressureAt ? routeTier(asked, role, e.background, { risky, underPressure: true }) : tier
+        // Marked only when the window actually moved the agent down.
+        if (lower !== tier) {
+          tier = lower
+          pressure = pct
+        }
+      }
       model = MODEL_FOR_TIER[tier]
     }
 
@@ -318,6 +367,8 @@ export const register: Register = (on, options) => {
         via,
         model: result.model,
         effort,
+        risky: risky || undefined,
+        pressure,
         // A model Claude named would have run anyway; otherwise the agent inherits its parent's.
         baselineModel: via === 'explicit' ? result.model : e.parentModel,
       }, true)
@@ -368,7 +419,7 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    await refreshStatus($, baseline, baselineName, mode)
+    await refreshStatus($, baseline, baselineName, mode, pressureAt)
     return next(e)
   })
 
@@ -394,12 +445,12 @@ export const register: Register = (on, options) => {
         {mode !== 'on' && <Text color="yellow">{modeLabel(mode)} (/router on to go back)</Text>}
         <Text> </Text>
         <Text dimColor wrap="truncate">
-          {'agent'.padEnd(labelWidth)} T model   {'cost'.padStart(7)} {baseHead.padStart(8)}
+          {'agent'.padEnd(labelWidth)} T  model   {'cost'.padStart(7)} {baseHead.padStart(8)}
         </Text>
         {rows.slice(0, room).map(r => (
           <Text wrap="truncate" dimColor={r.via === 'unrouted'}>
             {(r.label.length > labelWidth - 1 ? r.label.slice(0, labelWidth - 2) + '…' : r.label).padEnd(labelWidth)}
-            {r.tier ? TIER_TAG[r.tier] : '-'} {shortModel(r.model).padEnd(7)} {usd(r.cost).padStart(7)}{' '}
+            {tierTag(r)} {shortModel(r.model).padEnd(7)} {usd(r.cost).padStart(7)}{' '}
             {usd(baselineCost(r, baseline)).padStart(8)}
           </Text>
         ))}
@@ -407,7 +458,8 @@ export const register: Register = (on, options) => {
         <Text> </Text>
         <Text dimColor wrap="wrap">
           T: S simple→Haiku 5.5 at low effort, M standard→Sonnet at medium effort at most, H hard→Opus,
-          L long→Fable (background only). Dim rows are not routed. API list prices; plans billed by
+          L long→Fable (background only). ! risky, sent to Opus at least; ↓ one tier down for rate limits.
+          Dim rows are not routed. API list prices; plans billed by
           subscription see rate-limit use, not dollars.
         </Text>
       </Box>

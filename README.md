@@ -17,6 +17,10 @@ A Claude Code mod that picks the model for each subagent before it starts, and s
 
    Effort is only ever lowered, never raised, and only for agents the router picked a model for. An Agent call that sets its own effort keeps it.
 
+   **Risk floor.** Haiku also flags a task as risky when carrying it out could do costly or hard-to-reverse harm: deploying to production, deleting data, a migration or destructive command on shared data, a forced push. It judges the act, not the subject, so writing code that deals with payments or databases is not risky. A risky task runs on Opus at least, past the runner's cap and past rate-limit pressure. If no classifier answers, a narrow pattern check on destructive acts stands in. The pane marks these rows `!`.
+
+   **Rate limits.** When the fullest rate-limit window (5-hour or weekly) is at 80% or more (setting), every routed task goes one tier lower and never to Fable. Role floors still hold. The status line shows the window, and the pane marks these rows `↓`. Off a subscription there are no windows, so nothing changes.
+
    Guard rails: `runner` never goes above Sonnet; `architect` and `fixer` never go below Sonnet; `long` (Fable, 2.5 times Opus) only for background agents, so a foreground task the parent waits on tops out at Opus. If neither classifier gives a tier, the role default is used (architect: Opus, builder and fixer: Sonnet, runner: Haiku). Forks, workflow agents and agent-team teammates are not routed (the engine ignores a model change for the first two; a teammate is long-lived, so one classification of its first message is not a good guide). A model Claude already named in the Agent call is kept (setting), and the pane shows it at that model's tier.
 4. **Modes.** `/router off` leaves every subagent on the model it would have had; `/router haiku`, `/router sonnet` or `/router opus` sends every routed subagent to that model without asking the classifier (a model Claude named is still kept, per the setting below); `/router on` goes back to classifying. The mode is kept across sessions and shows in the status line; `/router status` names it.
 5. **Bill pane.** `/router` opens a pane: each agent, its tier, the model that ran it, what it cost, and what the same tokens would have cost without the router. The main conversation and unrouted agents are dim rows, and the Haiku classifier calls are counted in the total. A status line under the prompt shows the running total. `/router reset` clears it.
@@ -27,6 +31,8 @@ A Claude Code mod that picks the model for each subagent before it starts, and s
 - **Route every subagent**: on routes built-in subagents (Explore, general-purpose) too; off routes only the four router agents.
 - **Keep a model Claude asked for**: on by default.
 - **Lower effort for easy tasks**: on by default; off leaves every agent's effort alone.
+- **Send risky tasks to Opus**: on by default.
+- **Route cheaper near rate limits**: `80` (default), `70`, `90` or `off`; the percentage of the fullest rate-limit window at which routing goes one tier lower.
 
 ## Install
 
@@ -40,6 +46,7 @@ Needs Claude Code 2.1.287 or later (mods).
 
 ## Limits
 
+- The risk flag is Haiku's judgment of a short task description; the pattern check without it only catches plainly named acts. Neither replaces permission prompts.
 - The built-in classifier's calls are not in the bill: the engine does not report their tokens.
 - A routed subagent's first request may wait up to 2 seconds for its spawn to be recorded, so it gets its effort from the start.
 - Only subagents are routed. The main conversation stays on your session model, so total savings depend on how much work goes through subagents.

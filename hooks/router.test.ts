@@ -1,6 +1,17 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { capEffort, clampTier, costOf, familyOf, parseMode, parseTier, tierOfModel } from './lib/pricing'
+import {
+  capEffort,
+  clampTier,
+  costOf,
+  familyOf,
+  looksRisky,
+  parseMode,
+  parseRisky,
+  parseTier,
+  routeTier,
+  tierOfModel,
+} from './lib/pricing'
 
 /** Billionths of a dollar, so float sums compare exactly. */
 const nano = (usd: number) => Math.round(usd * 1e9)
@@ -190,6 +201,137 @@ describe('agent.spawn', () => {
   })
 })
 
+describe('risk floor and rate limits: pure rules', () => {
+  test('routeTier', async () => {
+    expect(routeTier('simple', 'builder', false, { risky: true })).toBe('hard')
+    // the risk floor goes past the runner's cap
+    expect(routeTier('simple', 'runner', false, { risky: true })).toBe('hard')
+    expect(routeTier('hard', 'builder', false, { underPressure: true })).toBe('standard')
+    expect(routeTier('long', 'builder', true, { underPressure: true })).toBe('hard')
+    expect(routeTier('long', 'builder', true)).toBe('long')
+    // role floors hold under pressure
+    expect(routeTier('standard', 'architect', false, { underPressure: true })).toBe('standard')
+    // risk wins over pressure
+    expect(routeTier('hard', 'builder', false, { risky: true, underPressure: true })).toBe('hard')
+    expect(routeTier('simple', 'builder', false, { underPressure: true })).toBe('simple')
+  })
+
+  test('the act is risky, not the subject', async () => {
+    expect(parseRisky('hard risky')).toBe(true)
+    expect(parseRisky('standard')).toBe(false)
+    expect(looksRisky('Deploy the new build to production')).toBe(true)
+    expect(looksRisky('run DROP TABLE users on the shared db')).toBe(true)
+    expect(looksRisky('git push --force origin main')).toBe(true)
+    expect(looksRisky('Add a refund endpoint that calls Stripe')).toBe(false)
+    expect(looksRisky('Write tests for the production config loader')).toBe(false)
+    expect(looksRisky('Rename the deploy script')).toBe(false)
+  })
+})
+
+/** Answers `$.session.usage()` with one five-hour window at `percent`. */
+function limitsAt(on: any, percent: number) {
+  on('session.usage', async () => ({
+    value: { startedAt: 0, context: {} as never, rateLimits: [{ kind: 'five_hour', percentUsed: percent }] },
+  }))
+}
+
+describe('risk floor and rate limits', () => {
+  test('a risky simple task runs on Opus', async ($, on) => {
+    mock.clock(on)
+    let spawnedOn: string | undefined
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'simple risky', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'r1' }
+    })
+    await $.agent.spawn(spawnInput())
+    expect(spawnedOn).toBe('claude-opus-5-5')
+  })
+
+  test('without a classifier, a destructive act still gets the floor', async ($, on) => {
+    mock.clock(on)
+    let spawnedOn: string | undefined
+    on('model.complete', async () => ({ value: {
+      isAnswered: false as const,
+      reason: 'api-error' as const,
+      status: 529,
+      error: 'overloaded' as const,
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    } }))
+    on('model.classify', async () => ({ value: 'simple' }))
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'r2' }
+    })
+    await $.agent.spawn(spawnInput({ subagentType: 'model-router:runner', prompt: 'Deploy the release to production now' }))
+    expect(spawnedOn).toBe('claude-opus-5-5')
+  })
+
+  test('the risk floor can be turned off', { options: { riskFloor: false } }, async ($, on) => {
+    mock.clock(on)
+    let spawnedOn: string | undefined
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'simple risky', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'r3' }
+    })
+    await $.agent.spawn(spawnInput())
+    expect(spawnedOn).toBe('claude-haiku-5-5')
+  })
+
+  test('past 80% of a rate-limit window, a hard task runs on Sonnet', async ($, on) => {
+    mock.clock(on)
+    limitsAt(on, 85)
+    let spawnedOn: string | undefined
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'hard', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'p1' }
+    })
+    await $.agent.spawn(spawnInput())
+    expect(spawnedOn).toBe('claude-sonnet-5-5')
+  })
+
+  test('below the threshold, nothing changes', async ($, on) => {
+    mock.clock(on)
+    limitsAt(on, 79)
+    let spawnedOn: string | undefined
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'hard', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'p2' }
+    })
+    await $.agent.spawn(spawnInput())
+    expect(spawnedOn).toBe('claude-opus-5-5')
+  })
+
+  test('with the setting off, rate limits are ignored', { options: { limitPressure: 'off' } }, async ($, on) => {
+    mock.clock(on)
+    limitsAt(on, 99)
+    let spawnedOn: string | undefined
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'hard', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'p3' }
+    })
+    await $.agent.spawn(spawnInput())
+    expect(spawnedOn).toBe('claude-opus-5-5')
+  })
+
+  test('a risky task keeps Opus under rate-limit pressure', async ($, on) => {
+    mock.clock(on)
+    limitsAt(on, 95)
+    let spawnedOn: string | undefined
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'standard risky', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'p4' }
+    })
+    await $.agent.spawn(spawnInput())
+    expect(spawnedOn).toBe('claude-opus-5-5')
+  })
+})
+
 describe('effort', () => {
   test('a simple task asks for low effort', async ($, on) => {
     mock.clock(on)
@@ -341,7 +483,7 @@ describe('bill', () => {
     })
     expect(await ui.find({ type: 'Text', text: /<\$0\.01 spent · \$0\.03 unrouted/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /76% saved/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /rename fooBar\s+S Haiku/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /rename fooBar\s+S\s+Haiku/ })).toBeDefined()
     await ui.unmount()
   })
 })

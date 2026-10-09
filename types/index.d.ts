@@ -23,6 +23,10 @@ export type AgentRow = {
    */
   via?: 'haiku' | 'builtin' | 'fallback' | 'explicit' | 'forced' | 'unrouted'
   model?: string
+  /** True when the task was judged risky and sent to at least the hard tier. */
+  risky?: boolean
+  /** The fullest rate-limit window, in percent, when it pushed this agent a tier down. */
+  pressure?: number
   /** The most effort this agent's requests may ask for; absent when the router leaves effort alone. */
   effort?: Effort
   /** What this agent would have run on without the router: the parent's model, or its own when unrouted. */
