@@ -343,6 +343,28 @@ describe('effort', () => {
     expect(seen.effort).toBe('low')
   })
 
+  test('the first request gets low effort even when it arrives before the spawn answers', async ($, on) => {
+    mock.clock(on)
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'simple', usage: USAGE } }))
+    let entered!: () => void
+    const spawnEntered = new Promise<void>(r => (entered = r))
+    let release!: () => void
+    const spawnReleased = new Promise<void>(r => (release = r))
+    on('agent.spawn', async (_$, e) => {
+      entered()
+      await spawnReleased
+      return { model: e.model ?? '', agentId: 'race1' }
+    })
+    const seen = captureEffort(on)
+    const spawning = $.agent.spawn(spawnInput())
+    await spawnEntered
+    // The agent's first request, sent while the spawn hook is still waiting on `next`.
+    const stepping = step($, 'race1', 'high')
+    release()
+    await Promise.all([spawning, stepping])
+    expect(seen.effort).toBe('low')
+  })
+
   test('a hard task keeps the effort it had', async ($, on) => {
     mock.clock(on)
     on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'hard', usage: USAGE } }))
