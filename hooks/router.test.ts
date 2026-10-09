@@ -142,6 +142,23 @@ describe('agent.spawn', () => {
     await $.agent.spawn(spawnInput({ fork: true, subagentType: 'fork' }))
     expect(spawnedOn).toBe(undefined)
   })
+
+  test('teammates are left alone and not classified', async ($, on) => {
+    mock.clock(on)
+    let spawnedOn: string | undefined = 'unset'
+    let classified = false
+    on('model.complete', async () => {
+      classified = true
+      return { value: { isAnswered: true as const, text: 'long', usage: USAGE } }
+    })
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: 'claude-opus-5-5', agentId: 'a6', teammateId: 'scout@team' }
+    })
+    await $.agent.spawn(spawnInput({ isTeammate: true, background: true, name: 'scout' }))
+    expect(spawnedOn).toBe(undefined)
+    expect(classified).toBe(false)
+  })
 })
 
 describe('bill', () => {

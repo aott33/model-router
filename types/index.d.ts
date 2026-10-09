@@ -15,7 +15,7 @@ export type AgentRow = {
   tier?: Tier
   /**
    * How the model was decided: the classifier, the role fallback, a model Claude
-   * named, or not routed (main, forks, workflow agents, built-ins when routing is off).
+   * named, or not routed (main, forks, workflow agents, teammates, built-ins when routing is off).
    */
   via?: 'haiku' | 'fallback' | 'explicit' | 'unrouted'
   model?: string
