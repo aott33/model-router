@@ -4,6 +4,17 @@ All notable changes to model-router. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-09
+
+### Added
+
+- Risk floor: Haiku flags a task as risky when carrying it out could do costly or hard-to-reverse harm (deploying to production, deleting data, a forced push), judging the act rather than the subject. A risky task runs on Opus at least, past the runner's cap and past rate-limit pressure. Without a classifier answer, a narrow pattern check on destructive acts stands in. New setting **Send risky tasks to Opus** (on by default). The pane marks these rows `!`.
+- Rate-limit awareness: when the fullest rate-limit window is at or past a threshold, routed tasks go one tier lower and never to Fable; role floors still hold. The status line shows the window. New setting **Route cheaper near rate limits** (`80` by default, or `70`, `90`, `off`). The pane marks these rows `↓`.
+
+### Changed
+
+- The classifier may now reply with two words (`hard risky`).
+
 ## [0.3.0] - 2026-10-09
 
 ### Added
@@ -35,7 +46,8 @@ First public release.
 - Settings: **Compare against** (`unrouted`, `fable`, `opus`, `sonnet`), **Route every subagent**, **Keep a model Claude asked for**.
 - Pricing from the October 2026 API list prices, including Haiku 5.5's higher rate above a 100K-token prompt.
 
-[Unreleased]: https://github.com/aott33/model-router/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/aott33/model-router/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/aott33/model-router/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/aott33/model-router/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/aott33/model-router/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/aott33/model-router/releases/tag/v0.2.0

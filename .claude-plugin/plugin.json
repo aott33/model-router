@@ -1,6 +1,6 @@
 {
   "name": "model-router",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Haiku sorts every subagent task into simple, standard, hard or long run and picks the model; a pane shows what each agent cost.",
   "author": { "name": "Andy" },
   "types": "./types/index.d.ts",
@@ -29,6 +29,19 @@
       "title": "Lower effort for easy tasks",
       "description": "On: a simple task's subagent thinks at low effort and a standard one at medium at most. Hard and long tasks keep the effort they had, and an Agent call that sets its own effort keeps it",
       "default": true
+    },
+    "riskFloor": {
+      "type": "boolean",
+      "title": "Send risky tasks to Opus",
+      "description": "On: a task whose act could do costly or hard-to-reverse harm (deploying to production, deleting data, a forced push) runs on Opus at least, whatever its role or the rate limits",
+      "default": true
+    },
+    "limitPressure": {
+      "type": "string",
+      "title": "Route cheaper near rate limits",
+      "description": "When the fullest rate-limit window (5-hour or weekly) is at this percent or more, route one tier lower and never to Fable. off: ignore rate limits",
+      "options": ["off", "70", "80", "90"],
+      "default": "80"
     }
   }
 }

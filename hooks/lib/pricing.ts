@@ -165,6 +165,54 @@ export function clampTier(tier: Tier, role: string | undefined, background = tru
   return ORDER[i]!
 }
 
+/**
+ * The tier after the risk floor and rate-limit pressure.
+ *
+ * Under pressure (a rate-limit window past the threshold) the tier drops one step and
+ * `long` is off the table; the role's limits still hold. A risky task then goes to at
+ * least `hard`, past a role's cap too: getting a destructive act wrong costs more than
+ * the tokens, so the risk floor wins over pressure.
+ */
+export function routeTier(
+  tier: Tier,
+  role: string | undefined,
+  background: boolean,
+  o: { risky?: boolean; underPressure?: boolean } = {},
+): Tier {
+  const i = ORDER.indexOf(tier)
+  let t = clampTier(o.underPressure ? ORDER[Math.max(0, i - 1)]! : tier, role, background && !o.underPressure)
+  if (o.risky && ORDER.indexOf(t) < ORDER.indexOf('hard')) t = 'hard'
+  return t
+}
+
+/**
+ * Destructive acts, for when no classifier answered. Narrow on purpose: it names the act
+ * (deploying to production, dropping a table, a forced push), not the subject, so code
+ * that merely deals with payments or databases does not match.
+ */
+const RISKY_ACT =
+  /\b(deploy|ship|release|roll\s?out)\w*\b[^.\n]{0,40}\b(to|on|in)\s+(prod|production|live)\b|\bdrop\s+(table|database|schema)\b|\btruncate\s+table\b|\brm\s+-rf\s+\/|\bgit\s+push\s+(-f|--force)\b|\bforce[- ]push\b|\b(delete|wipe|purge)\b[^.\n]{0,30}\b(prod|production)\s+(data|database|db|bucket|users?)\b/i
+
+export function looksRisky(text: string): boolean {
+  return RISKY_ACT.test(text)
+}
+
+/** Reads the classifier's risk flag: the word `risky` after the tier. */
+export function parseRisky(text: string): boolean {
+  return /\brisky\b/i.test(text)
+}
+
+/** The fullest rate-limit window, in percent; 0 off a subscription or before the first reading. */
+export function fullestWindow(limits: readonly { percentUsed: number }[] | undefined): number {
+  return (limits ?? []).reduce((m, l) => Math.max(m, l.percentUsed), 0)
+}
+
+/** The `limitPressure` setting as a percentage, or undefined when off. */
+export function pressureThreshold(setting: unknown): number | undefined {
+  const n = Number(setting ?? 80)
+  return Number.isFinite(n) && n > 0 && n <= 100 ? n : undefined
+}
+
 export function fallbackTier(role: string | undefined): Tier {
   return (role && ROLE_LIMITS[role]?.fallback) || 'standard'
 }
@@ -182,7 +230,11 @@ standard - normal feature work: implement a function or component, write tests, 
 hard     - needs deep reasoning: architecture or design decisions, an intermittent or cross-cutting bug, concurrency, security, performance work, a migration with subtle risk.
 long     - a multi-hour autonomous run: a large multi-step build or migration across many files, explicitly long-running or background work that must keep going unattended.
 
-Pick the cheapest tier that will succeed. If unsure between two, pick the higher. Reply with one word: simple, standard, hard, or long.`
+Pick the cheapest tier that will succeed. If unsure between two, pick the higher.
+
+Then add the word risky if carrying out the task itself could do costly or hard-to-reverse harm: deploying to production, running a migration or a destructive command against production or shared data, deleting data, rotating or exposing credentials, moving money, force-pushing over shared history. Judge the act, not the subject: writing, refactoring or testing code that deals with payments, databases or credentials is not risky.
+
+Reply with the tier word alone, or the tier word and risky: for example "standard" or "hard risky".`
 
 /** What the engine's built-in classifier reads when Haiku 4.5 gives no tier: no rubric, so keep it short. */
 export function builtinClassifierText(input: { agentType: string; description: string; prompt: string }): string {
