@@ -15,7 +15,7 @@ A Claude Code mod that picks the model for each subagent before it starts, and s
    | hard | Opus 5.5 | hard bugs, architecture |
    | long | Fable 5.1 | multi-hour background runs |
 
-   Guard rails: `runner` never goes above Sonnet; `architect` and `fixer` never go below Sonnet; `long` (Fable, 2.5 times Opus) only for background agents, so a foreground task the parent waits on tops out at Opus. If Haiku fails or gives no tier, the role default is used (architect: Opus, builder and fixer: Sonnet, runner: Haiku). Forks and workflow agents are not routed (the engine ignores a model change for them). A model Claude already named in the Agent call is kept (setting), and the pane shows it at that model's tier.
+   Guard rails: `runner` never goes above Sonnet; `architect` and `fixer` never go below Sonnet; `long` (Fable, 2.5 times Opus) only for background agents, so a foreground task the parent waits on tops out at Opus. If Haiku fails or gives no tier, the role default is used (architect: Opus, builder and fixer: Sonnet, runner: Haiku). Forks, workflow agents and agent-team teammates are not routed (the engine ignores a model change for the first two; a teammate is long-lived, so one classification of its first message is not a good guide). A model Claude already named in the Agent call is kept (setting), and the pane shows it at that model's tier.
 4. **Bill pane.** `/router` opens a pane: each agent, its tier, the model that ran it, what it cost, and what the same tokens would have cost without the router. The main conversation and unrouted agents are dim rows, and the Haiku classifier calls are counted in the total. A status line under the prompt shows the running total. `/router reset` clears it.
 
 ## Settings (`/config`)

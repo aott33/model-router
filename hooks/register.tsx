@@ -119,12 +119,14 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
 
     // Not routed: forks always inherit, a workflow agent's model cannot be rewritten,
-    // and with routing narrowed only the router's own agents are touched.
-    if (e.fork || e.workflow || (!routeAll && !role)) {
+    // a teammate is long-lived and always background (so it would qualify for Fable on
+    // its first message alone), and with routing narrowed only the router's own agents
+    // are touched.
+    if (e.fork || e.workflow || e.isTeammate || (!routeAll && !role)) {
       const result = await next(e)
       if (result.deny === undefined && result.agentId) {
         await record($, result.agentId, now, {
-          label: e.description || e.subagentType,
+          label: e.description || e.name || e.subagentType,
           agentType: e.subagentType,
           via: 'unrouted',
           model: result.model,
