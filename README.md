@@ -47,3 +47,5 @@ Needs Claude Code 2.1.287 or later (mods).
 claude plugin validate .
 claude plugin test .
 ```
+
+Releases follow `RELEASING.md`; changes are listed in `CHANGELOG.md`.
