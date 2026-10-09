@@ -30,6 +30,7 @@ import {
   tokensFromUsage,
   usd,
   type Family,
+  type Effort,
   type Mode,
 } from './lib/pricing'
 
@@ -98,6 +99,13 @@ async function windowPercent($: EngineInterface): Promise<number> {
   }
 }
 
+/** What a mode does, as `/router` and `/router status` say it. */
+function modeText(mode: Mode): string {
+  if (mode === 'on') return 'on: Haiku picks the model for each subagent'
+  if (mode === 'off') return 'off: subagents run on the model they would have without the router'
+  return `sending every routed subagent to ${shortModel(MODEL_FOR_TIER[FORCED_TIER[mode]])}`
+}
+
 function modeLabel(mode: Mode): string | undefined {
   if (mode === 'on') return undefined
   if (mode === 'off') return 'router off'
@@ -136,14 +144,22 @@ async function storedMode($: EngineInterface): Promise<Mode | undefined> {
   }
 }
 
-/** The effort cap of a routed subagent, waiting briefly when its first step beats its spawn's record. */
-async function effortCapOf($: EngineInterface, agentId: string, starting: ReadonlySet<Promise<unknown>>) {
-  let row = (await read($, ledger)).rows[agentId]
-  if (!row && starting.size > 0) {
+/**
+ * The effort cap of a routed subagent. Its first step can beat its spawn's answer, so it
+ * waits briefly for spawns in flight. The caps are kept in memory because a hook reads
+ * `$.state` as of the moment it started: a row written during the wait is not seen. The
+ * ledger is the fallback after a hot reload has emptied memory.
+ */
+async function effortCapOf(
+  $: EngineInterface,
+  agentId: string,
+  caps: ReadonlyMap<string, Effort | undefined>,
+  starting: ReadonlySet<Promise<unknown>>,
+) {
+  if (!caps.has(agentId) && starting.size > 0) {
     await Promise.race([Promise.allSettled([...starting]), timeout($, SPAWN_WAIT_MS)])
-    row = (await read($, ledger)).rows[agentId]
   }
-  return row?.effort
+  return caps.has(agentId) ? caps.get(agentId) : (await read($, ledger)).rows[agentId]?.effort
 }
 
 export const register: Register = (on, options) => {
@@ -164,6 +180,8 @@ export const register: Register = (on, options) => {
   const callEffort = new Set<string>()
   /** Spawns between the call to `next` and its answer, which a first step may overtake. */
   const starting = new Set<Promise<unknown>>()
+  /** Each routed subagent's effort cap, by agent id, as soon as it has started. */
+  const effortCaps = new Map<string, Effort | undefined>()
 
   on('session.start', async ($, e, next) => {
     if (!modeLoaded) {
@@ -204,9 +222,7 @@ export const register: Register = (on, options) => {
       $.ui.status(modeLabel(mode))
       return { text: 'Model router bill cleared.' }
     }
-    if (arg === 'status') {
-      return { text: `Model router: ${modeLabel(mode) ?? 'on (Haiku picks the model for each subagent)'}.` }
-    }
+    if (arg === 'status') return { text: `Model router ${modeText(mode)}.` }
     const picked = parseMode(arg)
     if (picked) {
       mode = picked
@@ -217,14 +233,8 @@ export const register: Register = (on, options) => {
         $.ui.log(`could not save the router mode: ${String(err)}`)
       }
       await refreshStatus($, baseline, baselineName, mode, pressureAt)
-      const what = {
-        on: 'on: Haiku picks the model for each subagent',
-        off: 'off: subagents run on the model they would have without the router',
-        haiku: `sending every routed subagent to ${shortModel(MODEL_FOR_TIER.simple)}`,
-        sonnet: `sending every routed subagent to ${shortModel(MODEL_FOR_TIER.standard)}`,
-        opus: `sending every routed subagent to ${shortModel(MODEL_FOR_TIER.hard)}`,
-      }[mode]
-      return { text: `Model router ${what}. Kept across sessions; /router on to go back.` }
+      const back = mode === 'on' ? '' : '; /router on to go back'
+      return { text: `Model router ${modeText(mode)}. Kept across sessions${back}.` }
     }
     if (arg) return { text: `Unknown option "${arg}". Use on, off, haiku, sonnet, opus, status or reset.` }
     await $.ui.open({ id: PANE, title: 'Model router', focus: true, closeOnEscape: true })
@@ -354,12 +364,13 @@ export const register: Register = (on, options) => {
         ? EFFORT_CAP[tier]
         : undefined
 
-    const started = next({ ...e, model })
-    starting.add(started)
-    let result: Awaited<typeof started>
-    try {
-      result = await started
+    // Held in `starting` until the cap is known: the agent's first request can arrive
+    // before `next` answers and must wait for its effort cap.
+    const spawned = (async () => {
+      const result = await next({ ...e, model })
       if (result.deny !== undefined || !result.agentId) return result
+      if (effortCaps.size > 500) effortCaps.clear()
+      effortCaps.set(result.agentId, effort)
       await record($, result.agentId, now, {
         label: e.description,
         agentType: e.subagentType,
@@ -372,10 +383,14 @@ export const register: Register = (on, options) => {
         // A model Claude named would have run anyway; otherwise the agent inherits its parent's.
         baselineModel: via === 'explicit' ? result.model : e.parentModel,
       }, true)
+      return result
+    })()
+    starting.add(spawned)
+    try {
+      return await spawned
     } finally {
-      starting.delete(started)
+      starting.delete(spawned)
     }
-    return result
   }).catch(($, e, next) => next(e)) // routing is an optimisation: on failure, spawn as asked
 
   // 3. Effort, lowered for easy tiers. 4. The bill: every model request, priced on the model that answered it.
@@ -383,7 +398,7 @@ export const register: Register = (on, options) => {
     let request = e
     if (effortByTier && e.agentId && e.effort !== undefined) {
       try {
-        const effort = capEffort(e.effort, await effortCapOf($, e.agentId, starting))
+        const effort = capEffort(e.effort, await effortCapOf($, e.agentId, effortCaps, starting))
         if (effort !== e.effort) request = { ...e, effort }
       } catch {
         // leave the request as it is

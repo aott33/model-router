@@ -4,6 +4,13 @@ All notable changes to model-router. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-09
+
+### Fixed
+
+- A routed subagent's first request now gets its lowered effort. It used to go out at the session's effort, because the wait for the spawn re-read shared state that a hook only sees as of when it started. Found by running the mod in a live session; later requests were already right.
+- `/router status` no longer says "router" twice, and `/router on` no longer suggests `/router on to go back`.
+
 ## [0.4.0] - 2026-10-09
 
 ### Added
@@ -46,7 +53,8 @@ First public release.
 - Settings: **Compare against** (`unrouted`, `fable`, `opus`, `sonnet`), **Route every subagent**, **Keep a model Claude asked for**.
 - Pricing from the October 2026 API list prices, including Haiku 5.5's higher rate above a 100K-token prompt.
 
-[Unreleased]: https://github.com/aott33/model-router/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/aott33/model-router/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/aott33/model-router/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/aott33/model-router/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/aott33/model-router/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/aott33/model-router/compare/v0.2.0...v0.2.1

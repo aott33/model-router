@@ -1,6 +1,6 @@
 {
   "name": "model-router",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Haiku sorts every subagent task into simple, standard, hard or long run and picks the model; a pane shows what each agent cost.",
   "author": { "name": "Andy" },
   "types": "./types/index.d.ts",
