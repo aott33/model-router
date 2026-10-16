@@ -4,6 +4,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [Sem
 
 ## [Unreleased]
 
+### Fixed
+
+- The status line says `no agents routed yet` instead of `$N vs $N unrouted (0% saved)` until an agent is routed. Against the unrouted baseline the main conversation alone can never save anything, so the comparison looked like a fault.
+
 ## [0.8.0] - 2026-10-14
 
 ### Added

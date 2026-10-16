@@ -903,6 +903,21 @@ describe('status line', () => {
     expect(seen.at(-1)).toMatch(/\(\d+% more\)/)
     expect(seen.at(-1)).not.toContain('saved')
   })
+
+  test('with only the main conversation billed, says no agents are routed instead of 0% saved', async ($, on) => {
+    mock.clock(on)
+    engineBeneath(on)
+    const seen: (string | undefined)[] = []
+    on('ui.status', async (_$, e) => {
+      seen.push(e.text)
+      return { value: undefined }
+    })
+    answerSteps(on, 'claude-opus-5-5')
+    await step($, undefined as never, undefined)
+    await $.turn.complete({ turnId: 'm1', answer: '', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+    expect(seen.at(-1)).toMatch(/^\$\d+\.\d+ · no agents routed yet$/)
+    expect(seen.at(-1)).not.toContain('saved')
+  })
 })
 
 describe('0.6.0 rules', () => {
