@@ -324,14 +324,19 @@ async function refreshStatus(
   pressureAt: number | undefined,
   budgetLimit?: number,
 ) {
-  const t = totals(await read($, ledger), baseline)
+  const l = await read($, ledger)
+  const t = totals(l, baseline)
   const parts = [modeLabel(mode)]
   if (budgetLimit !== undefined) parts.push(`budget ${Math.round((t.cost / budgetLimit) * 100)}% of $${budgetLimit}`)
   if (mode === 'on' && pressureAt !== undefined) {
     const pct = await windowPercent($)
     if (pct >= pressureAt) parts.push(`limits ${Math.round(pct)}%: one tier down`)
   }
-  if (t.base > 0) parts.push(`${usd(t.cost)} vs ${usd(t.base)} ${baselineName} (${statusSaved(t.saved)})`)
+  // Against the unrouted baseline nothing can be saved until an agent is routed: the main
+  // conversation is never routed, so "N vs N (0% saved)" would only look like a fault.
+  if (baseline === 'unrouted' && l.routed === 0) {
+    if (t.cost > 0) parts.push(`${usd(t.cost)} · no agents routed yet`)
+  } else if (t.base > 0) parts.push(`${usd(t.cost)} vs ${usd(t.base)} ${baselineName} (${statusSaved(t.saved)})`)
   const text = parts.filter(Boolean).join(' · ')
   $.ui.status(text || undefined)
 }
