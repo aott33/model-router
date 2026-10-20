@@ -28,7 +28,7 @@ export const MODEL_FOR_TIER: Record<Tier, string> = {
 
 /**
  * The classifier: Haiku 5.5 at low effort. In a live run it answered all eight test tasks
- * within the 8-token cap, at a seventh of Haiku 4.5's cost, and placed a small feature as
+ * in one word each, at a seventh of Haiku 4.5's cost, and placed a small feature as
  * standard where Haiku 4.5 said simple.
  */
 export const CLASSIFIER_MODEL = 'claude-haiku-5-5'
@@ -247,6 +247,18 @@ export function looksRisky(text: string): boolean {
 }
 
 const TIER_RE = /\b(simple|standard|hard|long)\b/i
+/** `risky` not negated: "not risky", "no risky flag", "non-risky" and "never risky" do not count. */
+const RISKY_RE = /(?<!\b(?:not|no|non|never|isn'?t|without)[\s-]+)\brisky\b/i
+
+function trimmedLines(text: string): string[] {
+  return text.split('\n').map(l => l.trim()).filter(Boolean)
+}
+
+/** The index of the last line that names a tier, or -1. */
+function lastTierLine(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) if (TIER_RE.test(lines[i]!)) return i
+  return -1
+}
 
 /**
  * The classifier's verdict: the last line that names a tier. Haiku sometimes explains before
@@ -254,13 +266,19 @@ const TIER_RE = /\b(simple|standard|hard|long)\b/i
  * before any tier word has no verdict.
  */
 function verdictLine(text: string): string {
-  const lines = text.split('\n').map(l => l.trim()).filter(l => TIER_RE.test(l))
-  return lines[lines.length - 1] ?? ''
+  const lines = trimmedLines(text)
+  const at = lastTierLine(lines)
+  return at >= 0 ? lines[at]! : ''
 }
 
-/** Reads the classifier's risk flag: the word `risky` on the verdict line; false without one. */
+/**
+ * Reads the classifier's risk flag: an unnegated `risky` on the verdict line or after it
+ * ("hard risky", or "hard" then "risky: deploys to production"); false without a verdict.
+ */
 export function parseRisky(text: string): boolean {
-  return /\brisky\b/i.test(verdictLine(text))
+  const lines = trimmedLines(text)
+  const at = lastTierLine(lines)
+  return at >= 0 && RISKY_RE.test(lines.slice(at).join('\n'))
 }
 
 /** The fullest rate-limit window, in percent; 0 off a subscription or before the first reading. */
@@ -283,12 +301,16 @@ export function budgetUsd(setting: unknown): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
+/** Bumped when replies are read differently, so verdicts an older reading stored are not reused. */
+const CLASSIFIER_PARSE = 2
+
 /**
- * What the classifier read, as one string: the cache's key before hashing. The rubric is part
- * of it, so a new rubric doesn't reuse verdicts the old one gave.
+ * What the classifier read, as one string: the cache's key before hashing. The rubric and the
+ * parse version are part of it, so a new rubric or a new reading of replies doesn't reuse
+ * verdicts the old one gave.
  */
 export function classifyKey(input: { agentType: string; description: string; prompt: string }): string {
-  return `${CLASSIFIER_SYSTEM}\n${input.agentType}\n${input.description}\n${input.prompt}`
+  return `parse ${CLASSIFIER_PARSE}\n${CLASSIFIER_SYSTEM}\n${input.agentType}\n${input.description}\n${input.prompt}`
 }
 
 /** The tier as the pane says it. */

@@ -1589,9 +1589,62 @@ describe('0.8.1 fixes', () => {
   test('a classifier reply cut off before its verdict carries no risk flag', async () => {
     expect(parseTier('Commits locally, so no risky')).toBe(undefined)
     expect(parseRisky('Commits locally, so no risky')).toBe(false)
-    // an explanation after the verdict is not read as the verdict
+    // an explanation after the verdict is not read as the verdict, and "not risky" is not the flag
     expect(parseTier('standard\nA normal feature, not risky.')).toBe('standard')
     expect(parseRisky('standard\nA normal feature, not risky.')).toBe(false)
+    expect(parseRisky('Straightforward rename, so simple, not risky.')).toBe(false)
+    expect(parseRisky('simple (non-risky)')).toBe(false)
+    // the flag may follow the verdict on a line of its own
+    expect(parseTier('hard\nrisky: deploys to production')).toBe('hard')
+    expect(parseRisky('hard\nrisky: deploys to production')).toBe(true)
+  })
+
+  test('a verdict the old reading cached is not reused', async ($, on) => {
+    mock.clock(on)
+    const input = spawnInput()
+    // 0.8.0 keyed verdicts on the rubric and the task alone, and could read a cut-off reply as risky.
+    const key = await sha256(`${CLASSIFIER_SYSTEM}\n${input.subagentType}\n${input.description}\n${input.prompt}`)
+    mock.store(on, { classified: { [key]: 'standard|r' } })
+    let calls = 0
+    on('model.complete', async () => {
+      calls++
+      return { value: { isAnswered: true as const, text: 'standard', usage: USAGE } }
+    })
+    let spawnedOn: string | undefined
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'e2' }
+    })
+    await $.agent.spawn(input)
+    expect(calls).toBe(1)
+    expect(spawnedOn).toBe('claude-sonnet-5-5')
+  })
+
+  test('a row with requests on both sides of the threshold prices each side at its own rate', async ($, on) => {
+    mock.clock(on)
+    mock.store(on, { agentModels: { Explore: 'claude-haiku-5-5' } })
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'standard', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => ({ model: e.model ?? '', agentId: 'h2' }))
+    const reads = [30_000, 120_000]
+    on('turn.step', async function* (_$: unknown, e: any) {
+      return {
+        turnId: e.turnId,
+        index: e.index,
+        answer: '',
+        toolUses: [],
+        stopReason: 'end_turn' as never,
+        usage: { input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: reads.shift()!, cache_creation_input_tokens: 0, model: 'claude-sonnet-5-5' },
+      }
+    })
+    await $.agent.spawn(spawnInput({ subagentType: 'Explore', description: 'find callers' }))
+    await step($, 'h2', undefined)
+    await step($, 'h2', undefined)
+    const ui = await mountPane($)
+    // Sonnet $0.01 + $0.019 plus the $0.0006 classifier, against Haiku 5.5 $0.00065 for the 31K-token
+    // request and $0.00775 at the long rate for the 121K-token one: 252% more. Both requests at the
+    // short rate would read 1245% more, both at the long rate 169% more.
+    expect(await ui.find({ type: 'Text', text: /^Unrouted\s+<\$0\.01\s+252% more$/ })).toBeDefined()
+    await ui.unmount()
   })
 
   test('a cut-off classifier reply falls through to the built-in classifier without the risk floor', async ($, on) => {
