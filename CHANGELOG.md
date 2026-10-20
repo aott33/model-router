@@ -4,6 +4,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [Sem
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-20
+
 ### Fixed
 
 - The status line says `no agents routed yet` instead of `$N vs $N unrouted (0% saved)` until an agent is routed. Against the unrouted baseline the main conversation alone can never save anything, so the comparison looked like a fault.
@@ -117,7 +119,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [Sem
 
 First release: four agents, per-task routing across Haiku, Sonnet, Opus and Fable, the `/router` pane and three settings.
 
-[Unreleased]: https://github.com/aott33/model-router/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/aott33/model-router/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/aott33/model-router/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/aott33/model-router/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/aott33/model-router/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/aott33/model-router/compare/v0.7.0...v0.7.1
