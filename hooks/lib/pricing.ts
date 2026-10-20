@@ -28,7 +28,7 @@ export const MODEL_FOR_TIER: Record<Tier, string> = {
 
 /**
  * The classifier: Haiku 5.5 at low effort. In a live run it answered all eight test tasks
- * within the 8-token cap, at a seventh of Haiku 4.5's cost, and placed a small feature as
+ * in one word each, at a seventh of Haiku 4.5's cost, and placed a small feature as
  * standard where Haiku 4.5 said simple.
  */
 export const CLASSIFIER_MODEL = 'claude-haiku-5-5'
@@ -107,14 +107,20 @@ export function tierOfModel(model: string): Tier {
   return FAMILY_TIER[familyOf(model)]
 }
 
+/** True for a request whose prompt (input, cache reads and cache writes) is over Haiku 5.5's threshold. */
+export function isLongPrompt(t: Tokens): boolean {
+  return t.input + t.cacheRead + t.cacheWrite > HAIKU5_LONG_FROM
+}
+
 /**
- * Cost of one request's tokens on a family. Haiku 5.5 switches price above a 100K-token prompt,
- * so call it per request; on summed tokens it prices everything at the lower rate.
- * Cache writes cost 1.25x input for 5 minutes, 2x for an hour.
+ * Cost of a request's tokens on a family. Haiku 5.5 switches price above a 100K-token prompt,
+ * judged per request: `long` says which side the request fell on, else it is read off `t`.
+ * Summed tokens must be split by `isLongPrompt` first, or the sum crosses the threshold and
+ * everything is priced at the higher rate. Cache writes cost 1.25x input for 5 minutes, 2x
+ * for an hour.
  */
-export function costOf(t: Tokens, family: Family, ttl: CacheTtl = '5m'): number {
-  const prompt = t.input + t.cacheRead + t.cacheWrite
-  const p = family === 'haiku5' && prompt > HAIKU5_LONG_FROM ? HAIKU5_LONG : PRICES[family]
+export function costOf(t: Tokens, family: Family, ttl: CacheTtl = '5m', long = isLongPrompt(t)): number {
+  const p = family === 'haiku5' && long ? HAIKU5_LONG : PRICES[family]
   const write = ttl === '1h' ? p.input * 2 : p.cacheWrite
   return (t.input * p.input + t.output * p.output + t.cacheWrite * write + t.cacheRead * p.cacheRead) / 1e6
 }
@@ -139,6 +145,15 @@ export function addTokens(a: Tokens, b: Tokens): Tokens {
     output: a.output + b.output,
     cacheRead: a.cacheRead + b.cacheRead,
     cacheWrite: a.cacheWrite + b.cacheWrite,
+  }
+}
+
+export function subTokens(a: Tokens, b: Tokens): Tokens {
+  return {
+    input: a.input - b.input,
+    output: a.output - b.output,
+    cacheRead: a.cacheRead - b.cacheRead,
+    cacheWrite: a.cacheWrite - b.cacheWrite,
   }
 }
 
@@ -231,18 +246,39 @@ export function looksRisky(text: string): boolean {
   return RISKY_ACT.test(text)
 }
 
-/**
- * The classifier's verdict: its last non-empty line. Haiku sometimes explains first, and the
- * explanation can name other tiers or say "not risky".
- */
-function verdictLine(text: string): string {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
-  return lines[lines.length - 1] ?? ''
+const TIER_RE = /\b(simple|standard|hard|long)\b/i
+/** `risky` not negated: "not risky", "no risky flag", "non-risky" and "never risky" do not count. */
+const RISKY_RE = /(?<!\b(?:not|no|non|never|isn'?t|without)[\s-]+)\brisky\b/i
+
+function trimmedLines(text: string): string[] {
+  return text.split('\n').map(l => l.trim()).filter(Boolean)
 }
 
-/** Reads the classifier's risk flag: the word `risky` after the tier, on the verdict line. */
+/** The index of the last line that names a tier, or -1. */
+function lastTierLine(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) if (TIER_RE.test(lines[i]!)) return i
+  return -1
+}
+
+/**
+ * The classifier's verdict: the last line that names a tier. Haiku sometimes explains before
+ * or after it, and the explanation can name other tiers or say "not risky"; a reply cut off
+ * before any tier word has no verdict.
+ */
+function verdictLine(text: string): string {
+  const lines = trimmedLines(text)
+  const at = lastTierLine(lines)
+  return at >= 0 ? lines[at]! : ''
+}
+
+/**
+ * Reads the classifier's risk flag: an unnegated `risky` on the verdict line or after it
+ * ("hard risky", or "hard" then "risky: deploys to production"); false without a verdict.
+ */
 export function parseRisky(text: string): boolean {
-  return /\brisky\b/i.test(verdictLine(text))
+  const lines = trimmedLines(text)
+  const at = lastTierLine(lines)
+  return at >= 0 && RISKY_RE.test(lines.slice(at).join('\n'))
 }
 
 /** The fullest rate-limit window, in percent; 0 off a subscription or before the first reading. */
@@ -265,12 +301,16 @@ export function budgetUsd(setting: unknown): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
+/** Bumped when replies are read differently, so verdicts an older reading stored are not reused. */
+const CLASSIFIER_PARSE = 2
+
 /**
- * What the classifier read, as one string: the cache's key before hashing. The rubric is part
- * of it, so a new rubric doesn't reuse verdicts the old one gave.
+ * What the classifier read, as one string: the cache's key before hashing. The rubric and the
+ * parse version are part of it, so a new rubric or a new reading of replies doesn't reuse
+ * verdicts the old one gave.
  */
 export function classifyKey(input: { agentType: string; description: string; prompt: string }): string {
-  return `${CLASSIFIER_SYSTEM}\n${input.agentType}\n${input.description}\n${input.prompt}`
+  return `parse ${CLASSIFIER_PARSE}\n${CLASSIFIER_SYSTEM}\n${input.agentType}\n${input.description}\n${input.prompt}`
 }
 
 /** The tier as the pane says it. */
@@ -382,10 +422,9 @@ export function fallbackTier(role: string | undefined): Tier {
   return (role && ROLE_LIMITS[role]?.fallback) || 'standard'
 }
 
-/** Reads the classifier's reply: the first tier word on its verdict line, else in the whole reply. */
+/** Reads the classifier's reply: the tier word on its verdict line; undefined without one. */
 export function parseTier(text: string): Tier | undefined {
-  const tierIn = (t: string) => /\b(simple|standard|hard|long)\b/i.exec(t)?.[1]?.toLowerCase() as Tier | undefined
-  return tierIn(verdictLine(text)) ?? tierIn(text)
+  return TIER_RE.exec(verdictLine(text))?.[1]?.toLowerCase() as Tier | undefined
 }
 
 export const CLASSIFIER_SYSTEM = `You route coding subagent tasks to a model. Read the task and reply with exactly one word.

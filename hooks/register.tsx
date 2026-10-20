@@ -27,6 +27,7 @@ import {
   fallbackTier,
   familyOf,
   fullestWindow,
+  isLongPrompt,
   looksRisky,
   parseMode,
   parseRisky,
@@ -36,6 +37,7 @@ import {
   rescueTier,
   roleOf,
   routeTier,
+  subTokens,
   tierOfModel,
   tokensFromUsage,
   usd,
@@ -91,12 +93,19 @@ function ttlOf(id: string): CacheTtl {
 }
 
 /**
- * The same tokens on the baseline. Priced on the row's summed tokens, so a fixed baseline
- * or a later change of the setting reprices the whole bill.
+ * The same tokens on the baseline. Priced from the row's summed tokens, so a fixed baseline
+ * or a later change of the setting reprices the whole bill; a row that ran on its own model
+ * is, under the unrouted baseline, its own cost.
  */
 function baselineCost(r: AgentRow, baseline: Baseline): number {
+  // A row that ran on its own model (the main conversation, a fork, a model Claude named) cost
+  // what it cost: no repricing, so a model the main conversation switched to counts as itself.
+  if (baseline === 'unrouted' && (r.via === 'unrouted' || r.via === 'explicit')) return r.cost
   const family = baseline === 'unrouted' ? familyOf(r.baselineModel ?? r.model) : baseline
-  return costOf(r.tokens, family, ttlOf(r.id))
+  const ttl = ttlOf(r.id)
+  // Each side of Haiku 5.5's long-prompt threshold at its own rate, as the requests were billed.
+  const long = r.longTokens ?? ZERO
+  return costOf(subTokens(r.tokens, long), family, ttl, false) + costOf(long, family, ttl, true)
 }
 
 function totals(l: RouterLedger, baseline: Baseline) {
@@ -160,8 +169,17 @@ const BAND_FADE_MS = 30_000
  * Marks an agent finished, once: its row gets `finishedAt`, restored first if a `/clear`
  * wiped it, and the band is drawn again when the line's time is up.
  */
-async function finishAgent($: EngineInterface, id: string, spawnRows: ReadonlyMap<string, SpawnRow>) {
+async function finishAgent(
+  $: EngineInterface,
+  id: string,
+  spawnRows: ReadonlyMap<string, SpawnRow>,
+  health: ReadonlyMap<string, Health>,
+) {
   const now = await $.clock.now()
+  // The rescue's clock stops while the agent is finished: time waiting for a wake is not time
+  // struggling. rescueStep starts it again, and the counts over, when the agent runs again.
+  const h = health.get(id)
+  if (h && h.idleFrom === undefined) h.idleFrom = now
   let finished = false
   await update($, ledger, l => {
     finished = false
@@ -184,7 +202,11 @@ const RECONCILE_AFTER_MS = 10_000
  * were missed (it ended before this module loaded, or was killed): its band line would
  * otherwise stay up for the rest of the session.
  */
-async function reconcileAgents($: EngineInterface, spawnRows: ReadonlyMap<string, SpawnRow>) {
+async function reconcileAgents(
+  $: EngineInterface,
+  spawnRows: ReadonlyMap<string, SpawnRow>,
+  health: ReadonlyMap<string, Health>,
+) {
   const l = await read($, ledger)
   const now = await $.clock.now()
   const open = Object.values(l.rows).filter(
@@ -194,7 +216,7 @@ async function reconcileAgents($: EngineInterface, spawnRows: ReadonlyMap<string
   const status = new Map((await $.agent.list()).map(a => [a.id, a.status as string]))
   for (const r of open) {
     const s = status.get(r.id)
-    if (s === undefined || ENDED.has(s)) await finishAgent($, r.id, spawnRows)
+    if (s === undefined || ENDED.has(s)) await finishAgent($, r.id, spawnRows, health)
   }
 }
 
@@ -222,8 +244,11 @@ function tierLabel(r: AgentRow): string {
   return TIER_WORD[r.tier] + (r.rescued ? '↑' : r.risky ? '!' : r.pressure !== undefined || r.budget !== undefined ? '↓' : '')
 }
 
-/** How a routed agent is getting on, for the rescue: its tier and role, and what went wrong so far. */
-type Health = { tier: Tier; role: string | undefined; errors: number; steps: number; since: number }
+/**
+ * How a routed agent is getting on, for the rescue: its tier and role, what went wrong so far,
+ * and when it finished (`idleFrom`) if it has not run since.
+ */
+type Health = { tier: Tier; role: string | undefined; errors: number; steps: number; since: number; idleFrom?: number }
 
 /**
  * Counts one more request of a routed agent and, when it is struggling, moves it up one model:
@@ -243,8 +268,15 @@ async function rescueStep(
 ) {
   const h = maps.health.get(id)
   if (!h) return
-  h.steps += 1
   const now = await $.clock.now()
+  if (h.idleFrom !== undefined) {
+    // Woken after finishing (SendMessage): the time it sat idle is left out, and the counts start over.
+    h.since += now - h.idleFrom
+    h.idleFrom = undefined
+    h.steps = 0
+    h.errors = 0
+  }
+  h.steps += 1
   const reason = rescueReason(h.tier, { errors: h.errors, steps: h.steps, ms: now - h.since })
   if (!reason) return
   const up = rescueTier(h.tier, h.role)
@@ -672,7 +704,9 @@ export const register: Register = (on, options) => {
               description: e.description,
               prompt: e.prompt,
             }),
-            maxTokens: 8,
+            // Room for a short explanation before the verdict: a reply cut off before its
+            // last line would be read without one.
+            maxTokens: 48,
             effort: CLASSIFIER_EFFORT,
             timeoutMs: CLASSIFY_MS,
           },
@@ -682,7 +716,9 @@ export const register: Register = (on, options) => {
         await update($, ledger, l => ({ ...l, classifierCost: l.classifierCost + c }))
         if (r.isAnswered) {
           picked = parseTier(r.text)
-          risky = parseRisky(r.text)
+          // The risk flag comes with a verdict or not at all: a reply cut off mid-explanation
+          // ("...so no risky") must not flag the task.
+          risky = picked !== undefined && parseRisky(r.text)
           if (picked) await rememberClass($, classCache, key, { tier: picked, risky })
         }
       } catch {
@@ -838,10 +874,13 @@ export const register: Register = (on, options) => {
           ...l.rows,
           [id]: {
             ...row,
-            model: row.model ?? usage.model,
+            // The main conversation shows the model it is on now (/model can change it); a
+            // subagent keeps the model it was spawned on or moved up to.
+            model: id === 'main' ? (usage.model ?? row.model) : (row.model ?? usage.model),
             via: row.via ?? (id === 'main' ? 'unrouted' : row.via),
             baselineModel: row.baselineModel ?? (id === 'main' ? usage.model : undefined),
             tokens: addTokens(row.tokens, t),
+            longTokens: isLongPrompt(t) ? addTokens(row.longTokens ?? ZERO, t) : row.longTokens,
             cost: row.cost + actual,
             // A finished agent woken again (SendMessage) is running once more.
             finishedAt: undefined,
@@ -853,7 +892,9 @@ export const register: Register = (on, options) => {
   })
 
   // The main conversation's turn: the bill as it stood when the turn began, for the receipt.
+  // A subagent's run starts turns of its own inside it, which must not restart the mark.
   on('turn.start', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
     try {
       const t = totals(await read($, ledger), baseline)
       const agents = Object.keys((await read($, ledger)).rows).filter(id => id !== 'main').length
@@ -870,7 +911,7 @@ export const register: Register = (on, options) => {
   // main conversation's turn writes the receipt and finishes agents the engine has dropped.
   on('turn.complete', async ($, e, next) => {
     if (e.agentId) {
-      await finishAgent($, e.agentId, spawnRows)
+      await finishAgent($, e.agentId, spawnRows, health)
     } else {
       try {
         const l = await read($, ledger)
@@ -887,7 +928,7 @@ export const register: Register = (on, options) => {
             lastTurn: { ms: now - mark.startedAt, agents: agents - mark.agents, cost, saved: t.base - mark.base - cost },
           }
         })
-        await reconcileAgents($, spawnRows)
+        await reconcileAgents($, spawnRows, health)
         // session.measure can trail the turn; read the engine's figures once more as it ends.
         const u = await $.session.usage()
         await update($, meter, m => ({
@@ -933,7 +974,7 @@ export const register: Register = (on, options) => {
   })
 
   on('classic.SubagentStop', async ($, e, next) => {
-    await finishAgent($, e.agent_id, spawnRows)
+    await finishAgent($, e.agent_id, spawnRows, health)
     await refreshStatus($, baseline, baselineName, await currentMode($), pressureAt, budgetLimit)
     return next(e)
   }).catch(($, e, next) => next(e)) // the bill is a side job: never hold up a stop
