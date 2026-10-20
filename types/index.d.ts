@@ -37,6 +37,8 @@ export type AgentRow = {
    */
   baselineGuessed?: boolean
   tokens: Tokens
+  /** The part of `tokens` from requests over Haiku 5.5's long-prompt threshold, which price higher there. */
+  longTokens?: Tokens
   /** USD at the price of the model that actually answered each step. */
   cost: number
   startedAt: number

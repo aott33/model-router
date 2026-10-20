@@ -9,6 +9,7 @@ import {
   costOf,
   explainTier,
   familyOf,
+  isLongPrompt,
   looksRisky,
   parseMode,
   parseRisky,
@@ -1468,5 +1469,147 @@ describe('0.8.0 pane at start', () => {
     expect(opened).toBe(0)
     await $.command.run({ command: 'router', args: '' } as never)
     expect(opened).toBe(1)
+  })
+})
+
+describe('0.8.1 fixes', () => {
+  test('Haiku 5.5 is priced per request: summed tokens are split at the long-prompt threshold', async () => {
+    expect(isLongPrompt({ input: 50_000, output: 0, cacheRead: 50_000, cacheWrite: 0 })).toBe(false)
+    expect(isLongPrompt({ input: 50_000, output: 0, cacheRead: 50_001, cacheWrite: 0 })).toBe(true)
+    // 8 requests of 1K input, 30K cache read and 500 output, each under the threshold: $0.0052
+    const req = { input: 1000, output: 500, cacheRead: 30_000, cacheWrite: 0 }
+    const sum = { input: 8000, output: 4000, cacheRead: 240_000, cacheWrite: 0 }
+    expect(nano(costOf(sum, 'haiku5', '5m', false))).toBe(nano(8 * costOf(req, 'haiku5')))
+    // left to judge the 248K-token sum itself, it would price everything at the 5x rate
+    expect(nano(costOf(sum, 'haiku5'))).toBe(nano(5 * 8 * costOf(req, 'haiku5')))
+  })
+
+  test('a routed agent compared with a learned Haiku 5.5 baseline is priced per request', async ($, on) => {
+    mock.clock(on)
+    mock.store(on, { agentModels: { Explore: 'claude-haiku-5-5' } })
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'standard', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => ({ model: e.model ?? '', agentId: 'h1' }))
+    on('turn.step', async function* (_$: unknown, e: any) {
+      return {
+        turnId: e.turnId,
+        index: e.index,
+        answer: '',
+        toolUses: [],
+        stopReason: 'end_turn' as never,
+        usage: { input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 30_000, cache_creation_input_tokens: 0, model: 'claude-sonnet-5-5' },
+      }
+    })
+    await $.agent.spawn(spawnInput({ subagentType: 'Explore', description: 'find callers' }))
+    for (let i = 0; i < 8; i++) await step($, 'h1', undefined)
+    const ui = await mountPane($)
+    // 8 x $0.01 on Sonnet plus the $0.0006 classifier, against 8 x $0.00065 on Haiku 5.5: 1450% more.
+    // Priced on the 248K-token sum, Haiku would be at its 5x rate and the gap would read 210% more.
+    expect(await ui.find({ type: 'Text', text: /^Unrouted\s+<\$0\.01\s+1450% more$/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('the main conversation that switches model is compared with what it ran on', async ($, on) => {
+    mock.clock(on)
+    mock.store(on)
+    on('agent.spawn', async () => ({ model: 'claude-haiku-5-5', agentId: 'u1' }))
+    on('turn.step', async function* (_$: unknown, e: any) {
+      return {
+        turnId: e.turnId,
+        index: e.index,
+        answer: '',
+        toolUses: [],
+        stopReason: 'end_turn' as never,
+        usage: { input_tokens: 0, output_tokens: 100_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: e.model },
+      }
+    })
+    const mainStep = async (model: string) => {
+      const s = $.turn.step({ turnId: 'm1', index: 0, model, messageCount: 1 })
+      for await (const _ of s) {
+        // drain
+      }
+      await s.result
+    }
+    await mainStep('claude-opus-5-5')
+    await mainStep('claude-sonnet-5-5')
+    // an unrouted subagent with no requests, so the table is drawn
+    await $.command.run({ command: 'router', args: 'off' } as never)
+    await $.agent.spawn(spawnInput({ description: 'look around' }))
+    const ui = await mountPane($)
+    // $2.00 on Opus then $1.00 on Sonnet: nothing was routed, so nothing was saved (not 25% against Opus)
+    expect(await ui.find({ type: 'Text', text: /^Spent\s+\$3\.00$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Unrouted\s+\$3\.00\s+saved 0%$/ })).toBeDefined()
+    // the Model column shows the model the main conversation is on now
+    expect(await ui.find({ type: 'Text', text: /^Sonnet$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Opus$/ })).toBe(undefined)
+    await ui.unmount()
+  })
+
+  test("a subagent's own turn does not restart the main turn's receipt", async ($, on) => {
+    const clock = mock.clock(on)
+    engineBeneath(on)
+    on('turn.start', async (_$: unknown, e: any) => ({ turnId: e.turnId }))
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'simple', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => ({ model: e.model ?? '', agentId: 'a1' }))
+    answerSteps(on, 'claude-haiku-5-5')
+    await $.turn.start({ text: 'rename it', turnId: 'm1' })
+    await clock.advance(5_000)
+    await $.agent.spawn(spawnInput())
+    // the subagent's run starts a turn of its own, inside the main one
+    await $.turn.start({ text: 'Rename the variable fooBar to fooBaz in src/a.ts', turnId: 's1', agentId: 'a1' } as never)
+    await step($, 'a1', undefined)
+    await $.turn.complete({ turnId: 'm1', answer: '', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+    const ui = await mountPane($)
+    // five seconds, one agent and the saving against Sonnet; a mark restarted by the subagent would say 0:00 and no agent
+    expect(await ui.find({ type: 'Text', text: /^Last turn\s+0:05 · 1 agent · \+<\$0\.01 · saved \$0\.01$/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('an agent woken after finishing is not moved up for the time it sat idle', async ($, on) => {
+    const clock = mock.clock(on)
+    engineBeneath(on)
+    on('model.complete', async () => ({ value: { isAnswered: true as const, text: 'simple', usage: USAGE } }))
+    on('agent.spawn', async (_$, e) => ({ model: e.model ?? '', agentId: 'w1' }))
+    const models: string[] = []
+    on('turn.step', async function* (_$: unknown, e: any) {
+      models.push(e.model)
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as never, usage: { ...USAGE, model: e.model } }
+    })
+    await $.agent.spawn(spawnInput())
+    await step($, 'w1', 'high')
+    await complete($, 'w1')
+    await clock.advance(11 * 60_000)
+    // woken by SendMessage: its clock starts again
+    await step($, 'w1', 'high')
+    await clock.advance(11 * 60_000)
+    // running on for another eleven minutes still counts
+    await step($, 'w1', 'high')
+    expect(models).toEqual(['claude-haiku-5-5', 'claude-haiku-5-5', 'claude-sonnet-5-5'])
+  })
+
+  test('a classifier reply cut off before its verdict carries no risk flag', async () => {
+    expect(parseTier('Commits locally, so no risky')).toBe(undefined)
+    expect(parseRisky('Commits locally, so no risky')).toBe(false)
+    // an explanation after the verdict is not read as the verdict
+    expect(parseTier('standard\nA normal feature, not risky.')).toBe('standard')
+    expect(parseRisky('standard\nA normal feature, not risky.')).toBe(false)
+  })
+
+  test('a cut-off classifier reply falls through to the built-in classifier without the risk floor', async ($, on) => {
+    mock.clock(on)
+    let maxTokens: unknown
+    on('model.complete', async (_$, e: any) => {
+      maxTokens = e.maxTokens
+      return { value: { isAnswered: true as const, text: 'Commits locally, so no risky', usage: USAGE } }
+    })
+    on('model.classify', async () => ({ value: 'simple' }))
+    let spawnedOn: string | undefined
+    on('agent.spawn', async (_$, e) => {
+      spawnedOn = e.model
+      return { model: e.model ?? '', agentId: 'c2' }
+    })
+    await $.agent.spawn(spawnInput())
+    expect(spawnedOn).toBe('claude-haiku-5-5')
+    // room for a short explanation before the verdict, so a reply is not cut off there
+    expect(maxTokens as number).toBeGreaterThanOrEqual(32)
   })
 })

@@ -7,6 +7,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [Sem
 ### Fixed
 
 - The status line says `no agents routed yet` instead of `$N vs $N unrouted (0% saved)` until an agent is routed. Against the unrouted baseline the main conversation alone can never save anything, so the comparison looked like a fault.
+- The Unrouted column prices Haiku 5.5 per request, as the bill does. Priced on an agent's summed tokens, almost any Haiku agent crossed the 100K-token threshold and was charged the 5x rate, which showed savings on work the router never touched.
+- A row that ran on its own model (the main conversation, a fork, a model Claude named) is compared with what it cost, so switching the main conversation's model mid-session no longer shows savings. The Model column follows that switch.
+- The Last turn receipt no longer restarts when a subagent starts a turn of its own.
+- An agent woken after finishing is not moved up a model for the time it sat idle.
+- The classifier may use up to 48 tokens, so a reply that explains itself reaches its verdict, and a reply cut off before any verdict no longer flags the task as risky.
 
 ## [0.8.0] - 2026-10-14
 

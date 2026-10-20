@@ -107,14 +107,20 @@ export function tierOfModel(model: string): Tier {
   return FAMILY_TIER[familyOf(model)]
 }
 
+/** True for a request whose prompt (input, cache reads and cache writes) is over Haiku 5.5's threshold. */
+export function isLongPrompt(t: Tokens): boolean {
+  return t.input + t.cacheRead + t.cacheWrite > HAIKU5_LONG_FROM
+}
+
 /**
- * Cost of one request's tokens on a family. Haiku 5.5 switches price above a 100K-token prompt,
- * so call it per request; on summed tokens it prices everything at the lower rate.
- * Cache writes cost 1.25x input for 5 minutes, 2x for an hour.
+ * Cost of a request's tokens on a family. Haiku 5.5 switches price above a 100K-token prompt,
+ * judged per request: `long` says which side the request fell on, else it is read off `t`.
+ * Summed tokens must be split by `isLongPrompt` first, or the sum crosses the threshold and
+ * everything is priced at the higher rate. Cache writes cost 1.25x input for 5 minutes, 2x
+ * for an hour.
  */
-export function costOf(t: Tokens, family: Family, ttl: CacheTtl = '5m'): number {
-  const prompt = t.input + t.cacheRead + t.cacheWrite
-  const p = family === 'haiku5' && prompt > HAIKU5_LONG_FROM ? HAIKU5_LONG : PRICES[family]
+export function costOf(t: Tokens, family: Family, ttl: CacheTtl = '5m', long = isLongPrompt(t)): number {
+  const p = family === 'haiku5' && long ? HAIKU5_LONG : PRICES[family]
   const write = ttl === '1h' ? p.input * 2 : p.cacheWrite
   return (t.input * p.input + t.output * p.output + t.cacheWrite * write + t.cacheRead * p.cacheRead) / 1e6
 }
@@ -139,6 +145,15 @@ export function addTokens(a: Tokens, b: Tokens): Tokens {
     output: a.output + b.output,
     cacheRead: a.cacheRead + b.cacheRead,
     cacheWrite: a.cacheWrite + b.cacheWrite,
+  }
+}
+
+export function subTokens(a: Tokens, b: Tokens): Tokens {
+  return {
+    input: a.input - b.input,
+    output: a.output - b.output,
+    cacheRead: a.cacheRead - b.cacheRead,
+    cacheWrite: a.cacheWrite - b.cacheWrite,
   }
 }
 
@@ -231,16 +246,19 @@ export function looksRisky(text: string): boolean {
   return RISKY_ACT.test(text)
 }
 
+const TIER_RE = /\b(simple|standard|hard|long)\b/i
+
 /**
- * The classifier's verdict: its last non-empty line. Haiku sometimes explains first, and the
- * explanation can name other tiers or say "not risky".
+ * The classifier's verdict: the last line that names a tier. Haiku sometimes explains before
+ * or after it, and the explanation can name other tiers or say "not risky"; a reply cut off
+ * before any tier word has no verdict.
  */
 function verdictLine(text: string): string {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  const lines = text.split('\n').map(l => l.trim()).filter(l => TIER_RE.test(l))
   return lines[lines.length - 1] ?? ''
 }
 
-/** Reads the classifier's risk flag: the word `risky` after the tier, on the verdict line. */
+/** Reads the classifier's risk flag: the word `risky` on the verdict line; false without one. */
 export function parseRisky(text: string): boolean {
   return /\brisky\b/i.test(verdictLine(text))
 }
@@ -382,10 +400,9 @@ export function fallbackTier(role: string | undefined): Tier {
   return (role && ROLE_LIMITS[role]?.fallback) || 'standard'
 }
 
-/** Reads the classifier's reply: the first tier word on its verdict line, else in the whole reply. */
+/** Reads the classifier's reply: the tier word on its verdict line; undefined without one. */
 export function parseTier(text: string): Tier | undefined {
-  const tierIn = (t: string) => /\b(simple|standard|hard|long)\b/i.exec(t)?.[1]?.toLowerCase() as Tier | undefined
-  return tierIn(verdictLine(text)) ?? tierIn(text)
+  return TIER_RE.exec(verdictLine(text))?.[1]?.toLowerCase() as Tier | undefined
 }
 
 export const CLASSIFIER_SYSTEM = `You route coding subagent tasks to a model. Read the task and reply with exactly one word.
